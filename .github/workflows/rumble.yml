@@ -1,0 +1,98 @@
+name: Rumble Auto Downloader
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 08:05 UTC = 11:05 Asia/Riyadh
+    - cron: "5 8 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rumble-auto-downloader
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    env:
+      QUALITY: ${{ vars.QUALITY || '240' }}
+      KEEP_RELEASES: ${{ vars.KEEP_RELEASES || '10' }}
+      RUMBLE_CHANNEL_URL: ${{ vars.RUMBLE_CHANNEL_URL || 'https://rumble.com/c/nickjfuentes' }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-requests
+
+      - name: Discover latest episode
+        id: discover
+        run: |
+          python3 scripts/rumble_discover.py discover
+
+      - name: Check existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.discover.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release already exists: $TAG"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "New release needed: $TAG"
+          fi
+
+      - name: Notify no new episode
+        if: steps.existing.outputs.exists == 'true'
+        run: |
+          python3 scripts/rumble_discover.py notify-skip
+
+      - name: Download 240p MP4
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          mkdir -p dist
+          ffmpeg -y -hide_banner -loglevel info -stats \
+            -headers "Referer: ${{ steps.discover.outputs.page_url }}\r\nUser-Agent: Mozilla/5.0\r\n" \
+            -i "${{ steps.discover.outputs.hls_url }}" \
+            -c copy -movflags +faststart \
+            "dist/${{ steps.discover.outputs.filename }}"
+
+      - name: Create GitHub Release
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.discover.outputs.tag }}
+          TITLE: ${{ steps.discover.outputs.title }}
+          PAGE_URL: ${{ steps.discover.outputs.page_url }}
+          FILE: dist/${{ steps.discover.outputs.filename }}
+        run: |
+          gh release create "$TAG" "$FILE" \
+            --title "$TITLE" \
+            --notes "Source: $PAGE_URL"
+
+      - name: Notify Telegram
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.discover.outputs.tag }}
+          ASSET_URL: https://github.com/${{ github.repository }}/releases/download/${{ steps.discover.outputs.tag }}/${{ steps.discover.outputs.filename_encoded }}
+        run: |
+          python3 scripts/rumble_discover.py notify-done
+
+      - name: Cleanup old releases
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/rumble_discover.py cleanup
+

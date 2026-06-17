@@ -1,0 +1,7 @@
+dist/
+.rumble_latest.json
+*.part
+*.mp4
+*.aac
+*.opus
+__pycache__/
