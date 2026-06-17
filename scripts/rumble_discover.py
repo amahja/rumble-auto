@@ -14,6 +14,7 @@ import requests
 
 CHANNEL_URL = os.getenv("RUMBLE_CHANNEL_URL", "https://rumble.com/c/nickjfuentes")
 OPENRSS_FALLBACK = os.getenv("OPENRSS_FALLBACK", "1") != "0"
+PLAYWRIGHT_FALLBACK = os.getenv("PLAYWRIGHT_FALLBACK", "1") != "0"
 QUALITY = os.getenv("QUALITY", "240")
 KEEP_RELEASES = int(os.getenv("KEEP_RELEASES", "10"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -35,6 +36,32 @@ def http_get(url, **kwargs):
     r = requests.get(url, headers=headers, timeout=45, **kwargs)
     r.raise_for_status()
     return r
+
+
+def browser_get_html(url):
+    if not PLAYWRIGHT_FALLBACK:
+        raise RuntimeError("Playwright fallback disabled")
+    log(f"Loading with browser fallback: {url}")
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        raise RuntimeError(f"Playwright is not available: {exc}") from exc
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent=UA,
+            viewport={"width": 1280, "height": 900},
+            locale="en-US",
+        )
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(7000)
+        html = page.content()
+        final_url = page.url
+        title = page.title()
+        browser.close()
+    log(f"Browser loaded: {title} ({final_url})")
+    return html
 
 
 def write_outputs(values):
@@ -71,10 +98,21 @@ def find_latest_episode():
     try:
         html = http_get(CHANNEL_URL).text
     except Exception as exc:
-        if not OPENRSS_FALLBACK:
+        if PLAYWRIGHT_FALLBACK:
+            log(f"Direct channel fetch failed; trying browser fallback: {exc}")
+            try:
+                html = browser_get_html(CHANNEL_URL)
+            except Exception as browser_exc:
+                log(f"Browser fallback failed: {browser_exc}")
+                if OPENRSS_FALLBACK:
+                    log("Trying Open RSS fallback")
+                    return find_latest_episode_openrss()
+                raise
+        elif OPENRSS_FALLBACK:
+            log(f"Direct channel fetch failed; trying Open RSS fallback: {exc}")
+            return find_latest_episode_openrss()
+        else:
             raise
-        log(f"Direct channel fetch failed; trying Open RSS fallback: {exc}")
-        return find_latest_episode_openrss()
 
     candidates = []
     for href, text in re.findall(r'href="([^"]*v[^"]+?\.html[^"]*)"[^>]*>(.*?)</a>', html, re.I | re.S):
@@ -119,7 +157,20 @@ def find_latest_episode_openrss():
     feed_url = "https://openrss.org/" + CHANNEL_URL.removeprefix("https://").removeprefix("http://")
     log(f"Checking Open RSS feed: {feed_url}")
     xml = http_get(feed_url).text
-    root = ElementTree.fromstring(xml)
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError as exc:
+        log(f"Open RSS XML parse failed; using regex fallback: {exc}")
+        candidates = []
+        for href in re.findall(r'https://rumble\.com/[^"\'<>\s]+?\.html', xml, re.I):
+            clean = href.replace("&amp;", "&").split("?")[0]
+            if "america-first" in clean.lower():
+                candidates.append((clean, "America First"))
+        if not candidates:
+            raise
+        candidates = list(dict.fromkeys(candidates))
+        candidates.sort(key=lambda item: ep_number_from_text(f"{item[0]} {item[1]}"), reverse=True)
+        return candidates[0]
     items = []
 
     # RSS 2.0 shape.
@@ -147,19 +198,26 @@ def find_latest_episode_openrss():
     if not items:
         raise RuntimeError("No America First episode links found via Open RSS fallback")
 
-    def ep_number(item):
-        page_url, title = item
-        m = re.search(r"ep\.?-?\s*(\d+)", f"{page_url} {title}", re.I)
-        return int(m.group(1)) if m else -1
-
-    items.sort(key=ep_number, reverse=True)
+    items.sort(key=lambda item: ep_number_from_text(f"{item[0]} {item[1]}"), reverse=True)
     latest = items[0]
     log(f"Latest Open RSS candidate: {latest[0]}")
     return latest
 
 
+def ep_number_from_text(text):
+    m = re.search(r"ep\.?-?\s*(\d+)", text, re.I)
+    return int(m.group(1)) if m else -1
+
+
 def get_embed_id(page_url):
-    html = http_get(page_url).text
+    try:
+        html = http_get(page_url).text
+    except Exception as exc:
+        if PLAYWRIGHT_FALLBACK:
+            log(f"Direct video page fetch failed; trying browser fallback: {exc}")
+            html = browser_get_html(page_url)
+        else:
+            raise
     patterns = [
         r'https://rumble\.com/embed/([^/"?]+)/',
         r'embedUrl\\?":\\?"https://rumble\.com/embed/([^/"?]+)/',

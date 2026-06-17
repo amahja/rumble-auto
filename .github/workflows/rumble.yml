@@ -32,7 +32,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg python3-requests
+          sudo apt-get install -y ffmpeg python3-pip
+          python3 -m pip install requests playwright
+          python3 -m playwright install --with-deps chromium
 
       - name: Discover latest episode
         id: discover
@@ -95,4 +97,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/rumble_discover.py cleanup
-
