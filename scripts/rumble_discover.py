@@ -221,6 +221,18 @@ def ep_number_from_text(text):
 
 
 def get_embed_id(page_url):
+    oembed_url = "https://rumble.com/api/Media/oembed.json?url=" + quote(page_url, safe="")
+    try:
+        log(f"Trying oEmbed API: {oembed_url}")
+        data = http_get(oembed_url, headers={"Referer": "https://rumble.com/", "User-Agent": UA}).json()
+        html = data.get("html", "")
+        m = re.search(r'https://rumble\.com/embed/([^/"?]+)/', html)
+        if m:
+            log("Found embed id via oEmbed")
+            return m.group(1)
+    except Exception as exc:
+        log(f"oEmbed lookup failed: {exc}")
+
     try:
         html = http_get(page_url).text
     except Exception as exc:
