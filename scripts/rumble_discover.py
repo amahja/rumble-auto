@@ -48,14 +48,25 @@ def browser_get_html(url):
         raise RuntimeError(f"Playwright is not available: {exc}") from exc
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
+        )
         page = browser.new_page(
             user_agent=UA,
             viewport={"width": 1280, "height": 900},
             locale="en-US",
         )
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(7000)
+        for _ in range(12):
+            page.wait_for_timeout(5000)
+            if "just a moment" not in page.title().lower():
+                break
         html = page.content()
         final_url = page.url
         title = page.title()
